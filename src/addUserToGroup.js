@@ -2,9 +2,29 @@
 
 const utils = require("../utils");
 const log = require("npmlog");
+const { MQTT } = require("./protocol");
+const { publishRequest, nextTaskID } = require("./mqttRequest");
 
 module.exports = function (defaultFuncs, api, ctx) {
 	return function addUserToGroup(userID, threadID, callback) {
+		if (ctx.mqttClient) {
+			const ids = utils.getType(userID) === "Array" ? userID : [userID];
+			return publishRequest(ctx, {
+				app_id: "772021112871879",
+				payload: JSON.stringify({
+					epoch_id: utils.generateOfflineThreadingID(),
+					tasks: [{
+						failure_count: null,
+						label: "23",
+						payload: JSON.stringify({ thread_key: threadID, contact_ids: ids, sync_group: 1 }),
+						queue_name: String(threadID),
+						task_id: nextTaskID(ctx)
+					}],
+					version_id: "24502707779384158"
+				}),
+				type: 3
+			}, callback);
+		}
 		let resolveFunc = function () { };
 		let rejectFunc = function () { };
 		const returnPromise = new Promise(function (resolve, reject) {

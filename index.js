@@ -2,6 +2,7 @@
 
 const utils = require("./utils");
 const log = require("npmlog");
+const { MQTT } = require("./src/protocol");
 
 let checkVerified = null;
 
@@ -9,6 +10,7 @@ const defaultLogRecordSize = 100;
 log.maxRecordSize = defaultLogRecordSize;
 
 function setOptions(globalOptions, options) {
+	options = options || {};
 	Object.keys(options).map(function (key) {
 		switch (key) {
 			case 'online':
@@ -32,7 +34,7 @@ function setOptions(globalOptions, options) {
 				globalOptions.listenEvents = Boolean(options.listenEvents);
 				break;
 			case 'pageID':
-				globalOptions.pageID = options.pageID.toString();
+				globalOptions.pageID = options.pageID == null ? undefined : options.pageID.toString();
 				break;
 			case 'updatePresence':
 				globalOptions.updatePresence = Boolean(options.updatePresence);
@@ -75,11 +77,12 @@ function setOptions(globalOptions, options) {
 }
 
 function buildAPI(globalOptions, html, jar) {
-	const maybeCookie = jar.getCookies("https://www.facebook.com").filter(function (val) {
+	const getCookies = typeof jar.getCookiesSync === "function" ? jar.getCookiesSync.bind(jar) : jar.getCookies.bind(jar);
+	const maybeCookie = getCookies("https://www.facebook.com").filter(function (val) {
 		return val.cookieString().split("=")[0] === "c_user";
 	});
 
-	const objCookie = jar.getCookies("https://www.facebook.com").reduce(function (obj, val) {
+	const objCookie = getCookies("https://www.facebook.com").reduce(function (obj, val) {
 		obj[val.cookieString().split("=")[0]] = val.cookieString().split("=")[1];
 		return obj;
 	}, {});
@@ -103,29 +106,37 @@ function buildAPI(globalOptions, html, jar) {
 	const clientID = (Math.random() * 2147483648 | 0).toString(16);
 
 
-	const oldFBMQTTMatch = html.match(/irisSeqID:"(.+?)",appID:219994525426954,endpoint:"(.+?)"/);
+	const oldFBMQTTMatch = html.match(new RegExp(`irisSeqID:"([^"]+)",appID:${MQTT.appId},endpoint:"([^"]+)"`));
 	let mqttEndpoint = null;
 	let region = null;
 	let irisSeqID = null;
 	let noMqttData = null;
 
+	const setMqttEndpoint = function (endpoint) {
+		mqttEndpoint = endpoint && endpoint.replace(/\\\//g, "/");
+		try {
+			region = new URL(mqttEndpoint).searchParams.get("region");
+			region = region ? region.toUpperCase() : null;
+		}
+		catch (_) {
+			region = null;
+		}
+	};
+
 	if (oldFBMQTTMatch) {
 		irisSeqID = oldFBMQTTMatch[1];
-		mqttEndpoint = oldFBMQTTMatch[2];
-		region = new URL(mqttEndpoint).searchParams.get("region").toUpperCase();
+		setMqttEndpoint(oldFBMQTTMatch[2]);
 		log.info("login", `Got this account's message region: ${region}`);
 	} else {
-		const newFBMQTTMatch = html.match(/{"app_id":"219994525426954","endpoint":"(.+?)","iris_seq_id":"(.+?)"}/);
+		const newFBMQTTMatch = html.match(new RegExp(`\\{"app_id":"${MQTT.appId}","endpoint":"([^"]+)","iris_seq_id":"([^"]+)"\\}`));
 		if (newFBMQTTMatch) {
 			irisSeqID = newFBMQTTMatch[2];
-			mqttEndpoint = newFBMQTTMatch[1].replace(/\\\//g, "/");
-			region = new URL(mqttEndpoint).searchParams.get("region").toUpperCase();
+			setMqttEndpoint(newFBMQTTMatch[1]);
 			log.info("login", `Got this account's message region: ${region}`);
 		} else {
-			const legacyFBMQTTMatch = html.match(/(\["MqttWebConfig",\[\],{fbid:")(.+?)(",appID:219994525426954,endpoint:")(.+?)(",pollingEndpoint:")(.+?)(3790])/);
+			const legacyFBMQTTMatch = html.match(new RegExp(`(\\["MqttWebConfig",\\[\\],\\{fbid:")(.+?)(",appID:${MQTT.appId},endpoint:")(.+?)(",pollingEndpoint:")(.+?)(3790])`));
 			if (legacyFBMQTTMatch) {
-				mqttEndpoint = legacyFBMQTTMatch[4];
-				region = new URL(mqttEndpoint).searchParams.get("region").toUpperCase();
+				setMqttEndpoint(legacyFBMQTTMatch[4]);
 				log.warn("login", `Cannot get sequence ID with new RegExp. Fallback to old RegExp (without seqID)...`);
 				log.info("login", `Got this account's message region: ${region}`);
 				log.info("login", `[Unused] Polling endpoint: ${legacyFBMQTTMatch[6]}`);
@@ -147,7 +158,10 @@ function buildAPI(globalOptions, html, jar) {
 		access_token: 'NONE',
 		clientMutationId: 0,
 		mqttClient: undefined,
-		lastSeqId: irisSeqID,
+		// The sequence embedded in page HTML is stale on some sessions. The
+		// realtime transport fetches a fresh sequence through GraphQL instead.
+		lastSeqId: null,
+		initialIrisSeqId: irisSeqID,
 		syncToken: undefined,
 		mqttEndpoint,
 		region,
@@ -179,10 +193,12 @@ function buildAPI(globalOptions, html, jar) {
 		'changeNickname',
 		'changeThreadColor',
 		'changeThreadEmoji',
+		'createAiTheme',
 		'createNewGroup',
 		'createPoll',
 		'deleteMessage',
 		'deleteThread',
+		'editMessage',
 		'forwardAttachment',
 		'getCurrentUserID',
 		'getEmojiUrl',
@@ -192,6 +208,7 @@ function buildAPI(globalOptions, html, jar) {
 		'getThreadInfo',
 		'getThreadList',
 		'getThreadPictures',
+		'getThemePictures',
 		'getUserID',
 		'getUserInfo',
 		'handleMessageRequest',
@@ -207,7 +224,9 @@ function buildAPI(globalOptions, html, jar) {
 		'resolvePhotoUrl',
 		'searchForThread',
 		'sendMessage',
+		'sendMessageMqtt',
 		'sendTypingIndicator',
+		'shareContact',
 		'setMessageReaction',
 		'setPostReaction',
 		'setTitle',
@@ -229,6 +248,17 @@ function buildAPI(globalOptions, html, jar) {
 	apiFuncNames.map(function (v) {
 		api[v] = require('./src/' + v)(defaultFuncs, api, ctx);
 	});
+	api.getThreadHistoryGraphQL = api.getThreadHistory;
+	api.createAITheme = api.createAiTheme;
+	api.createThemeAI = api.createAiTheme;
+	const httpSendMessage = api.sendMessage;
+	api.sendMessage = function sendMessage(message, threadID, callback, replyToMessage, isGroup) {
+		const hasUrl = message && typeof message === "object" && message.url;
+		if (ctx.mqttClient && !hasUrl && !Array.isArray(threadID)) {
+			return api.sendMessageMqtt(message, threadID, callback, replyToMessage);
+		}
+		return httpSendMessage(message, threadID, callback, replyToMessage, isGroup);
+	};
 
 	//Removing original `listen` that uses pull.
 	//Map it to listenMqtt instead for backward compatibly.
@@ -256,22 +286,29 @@ function loginHelper(appState, email, password, globalOptions, callback, prCallb
 		else if (utils.getType(appState) === 'String') {
 			const arrayAppState = [];
 			appState.split(';').forEach(c => {
-				const [key, value] = c.split('=');
+				const separator = c.indexOf('=');
+				if (separator < 1) return;
+				const key = c.slice(0, separator);
+				const value = c.slice(separator + 1);
 
 				arrayAppState.push({
 					key: (key || "").trim(),
 					value: (value || "").trim(),
 					domain: "facebook.com",
 					path: "/",
-					expires: new Date().getTime() + 1000 * 60 * 60 * 24 * 365
+					expires: new Date(Date.now() + 1000 * 60 * 60 * 24 * 365).toUTCString()
 				});
 			});
 			appState = arrayAppState;
 		}
 
 		appState.map(function (c) {
-			const str = c.key + "=" + c.value + "; expires=" + c.expires + "; domain=" + c.domain + "; path=" + c.path + ";";
-			jar.setCookie(str, "http://" + c.domain);
+			const domain = String(c.domain || "facebook.com").replace(/^\./, "");
+			const expiresValue = c.expires instanceof Date ? c.expires.toUTCString() :
+				typeof c.expires === "number" ? new Date(c.expires).toUTCString() : c.expires;
+			const expires = expiresValue && expiresValue !== "Infinity" ? "; expires=" + expiresValue : "";
+			const str = c.key + "=" + c.value + expires + "; domain=." + domain + "; path=" + (c.path || "/") + ";";
+			jar.setCookieSync(str, "https://www." + domain.replace(/^www\./, ""));
 		});
 
 		// Load the main page.
@@ -345,6 +382,8 @@ function login(loginData, options, callback) {
 		callback = options;
 		options = {};
 	}
+	options = options || {};
+	loginData = loginData || {};
 
 	const globalOptions = {
 		selfListen: false,

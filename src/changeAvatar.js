@@ -2,6 +2,7 @@
 
 const utils = require("../utils");
 const log = require("npmlog");
+const { GRAPHQL_DOCS } = require("./protocol");
 
 module.exports = function (defaultFuncs, api, ctx) {
 	function handleUpload(image, callback) {
@@ -81,7 +82,7 @@ module.exports = function (defaultFuncs, api, ctx) {
 				av: ctx.i_userID || ctx.userID,
 				fb_api_req_friendly_name: "ProfileCometProfilePictureSetMutation",
 				fb_api_caller_class: "RelayModern",
-				doc_id: "5066134240065849",
+				doc_id: GRAPHQL_DOCS.changeAvatar,
 				variables: JSON.stringify({
 					input: {
 						caption,

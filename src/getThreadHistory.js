@@ -2,6 +2,7 @@
 
 const utils = require("../utils");
 const log = require("npmlog");
+const { GRAPHQL_DOCS } = require("./protocol");
 
 
 function getExtension(original_extension, filename = "") {
@@ -624,11 +625,10 @@ module.exports = function (defaultFuncs, api, ctx) {
 		// `queries` has to be a string. I couldn't tell from the dev console. This
 		// took me a really long time to figure out. I deserve a cookie for this.
 		const form = {
-			"av": ctx.globalOptions.pageID,
+			"av": ctx.globalOptions.pageID || ctx.i_userID || ctx.userID,
 			queries: JSON.stringify({
 				o0: {
-					// This doc_id was valid on February 2nd 2017.
-					doc_id: "1498317363570230",
+					doc_id: GRAPHQL_DOCS.threadHistory,
 					query_params: {
 						id: threadID,
 						message_limit: amount,

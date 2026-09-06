@@ -7,6 +7,7 @@
 
 const utils = require("../utils");
 const log = require("npmlog");
+const { GRAPHQL_DOCS } = require("./protocol");
 
 
 function formatMessage(threadID, data) {
@@ -220,11 +221,10 @@ module.exports = function (defaultFuncs, api, ctx) {
 		}
 
 		const form = {
-			"av": ctx.globalOptions.pageID,
+			"av": ctx.globalOptions.pageID || ctx.i_userID || ctx.userID,
 			"queries": JSON.stringify({
 				"o0": {
-					//This doc_id is valid as of ? (prob January 18, 2020)
-					"doc_id": "1768656253222505",
+					"doc_id": GRAPHQL_DOCS.message,
 					"query_params": {
 						"thread_and_message_id": {
 							"thread_id": threadID,

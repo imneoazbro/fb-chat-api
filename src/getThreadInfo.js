@@ -2,6 +2,7 @@
 
 const utils = require("../utils");
 const log = require("npmlog");
+const { GRAPHQL_DOCS } = require("./protocol");
 
 function formatEventReminders(reminder) {
 	return {
@@ -177,7 +178,7 @@ module.exports = function (defaultFuncs, api, ctx) {
 		// took me a really long time to figure out. I deserve a cookie for this.
 		threadID.map(function (t, i) {
 			form["o" + i] = {
-				doc_id: "3449967031715030",
+				doc_id: GRAPHQL_DOCS.threadInfo,
 				query_params: {
 					id: t,
 					message_limit: 0,

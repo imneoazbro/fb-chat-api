@@ -2,37 +2,15 @@
 "use strict";
 const utils = require("../utils");
 const log = require("npmlog");
-const mqtt = require('mqtt');
-const websocket = require('websocket-stream');
-const HttpsProxyAgent = require('https-proxy-agent');
-const EventEmitter = require('events');
+const mqtt = require("mqtt");
+const websocket = require("websocket-stream");
+const { HttpsProxyAgent } = require("https-proxy-agent");
+const EventEmitter = require("events");
+const { GRAPHQL_DOCS, MQTT } = require("./protocol");
 
 const identity = function () { };
 
-const topics = [
-	"/legacy_web",
-	"/webrtc",
-	"/rtc_multi",
-	"/onevc",
-	"/br_sr", //Notification
-	//Need to publish /br_sr right after this
-	"/sr_res",
-	"/t_ms",
-	"/thread_typing",
-	"/orca_typing_notifications",
-	"/notify_disconnect",
-	//Need to publish /messenger_sync_create_queue right after this
-	"/orca_presence",
-	//Will receive /sr_res right here.
-
-	"/legacy_web_mtouch"
-	// "/inbox",
-	// "/mercury",
-	// "/messaging_events",
-	// "/orca_message_notifications",
-	// "/pp",
-	// "/webrtc_response",
-];
+const topics = MQTT.topics;
 
 function listenMqtt(defaultFuncs, api, ctx, globalCallback) {
 	//Don't really know what this does but I think it's for the active state?
@@ -42,14 +20,14 @@ function listenMqtt(defaultFuncs, api, ctx, globalCallback) {
 
 	const sessionID = Math.floor(Math.random() * 9007199254740991) + 1;
 	const username = {
-		u: ctx.i_userID || ctx.userID,
+		u: ctx.userID,
 		s: sessionID,
 		chat_on: chatOn,
 		fg: foreground,
 		d: utils.getGUID(),
 		ct: "websocket",
-		//App id from facebook
-		aid: "219994525426954",
+		// App id from Facebook.
+		aid: MQTT.appId,
 		mqtt_sid: "",
 		cp: 3,
 		ecp: 10,
@@ -62,36 +40,48 @@ function listenMqtt(defaultFuncs, api, ctx, globalCallback) {
 		a: ctx.globalOptions.userAgent,
 		aids: null
 	};
-	const cookies = ctx.jar.getCookies("https://www.facebook.com").join("; ");
+	if (ctx.globalOptions.pageID) username.av = ctx.globalOptions.pageID;
+	const cookies = ctx.jar.getCookieStringSync("https://www.facebook.com");
 
 	let host;
 	if (ctx.mqttEndpoint) {
-		host = `${ctx.mqttEndpoint}&sid=${sessionID}`;
+		host = `${ctx.mqttEndpoint}&sid=${sessionID}&cid=${ctx.clientID}`;
 	} else if (ctx.region) {
-		host = `wss://edge-chat.facebook.com/chat?region=${ctx.region.toLocaleLowerCase()}&sid=${sessionID}`;
+		host = `wss://edge-chat.facebook.com/chat?region=${ctx.region.toLowerCase()}&sid=${sessionID}&cid=${ctx.clientID}`;
 	} else {
-		host = `wss://edge-chat.facebook.com/chat?sid=${sessionID}`;
+		host = `wss://edge-chat.facebook.com/chat?sid=${sessionID}&cid=${ctx.clientID}`;
 	}
 
 	const options = {
 		clientId: "mqttwsclient",
-		protocolId: 'MQIsdp',
+		protocolId: "MQIsdp",
 		protocolVersion: 3,
 		username: JSON.stringify(username),
 		clean: true,
 		wsOptions: {
 			headers: {
-				'Cookie': cookies,
-				'Origin': 'https://www.facebook.com',
-				'User-Agent': ctx.globalOptions.userAgent,
-				'Referer': 'https://www.facebook.com/',
-				'Host': new URL(host).hostname //'edge-chat.facebook.com'
+				Cookie: cookies,
+				Origin: "https://www.facebook.com",
+				"User-Agent": ctx.globalOptions.userAgent || "Mozilla/5.0",
+				Referer: "https://www.facebook.com/",
+				Host: "edge-chat.facebook.com",
+				Connection: "Upgrade",
+				Pragma: "no-cache",
+				"Cache-Control": "no-cache",
+				Upgrade: "websocket",
+				"Sec-WebSocket-Version": "13",
+				"Accept-Encoding": "gzip, deflate, br",
+				"Accept-Language": "en-US,en;q=0.9",
+				"Sec-WebSocket-Extensions": "permessage-deflate; client_max_window_bits"
 			},
-			origin: 'https://www.facebook.com',
-			protocolVersion: 13
+			origin: "https://www.facebook.com",
+			protocolVersion: 13,
+			binaryType: "arraybuffer"
 		},
-		keepalive: 10,
-		reschedulePings: false
+		keepalive: MQTT.keepalive,
+		reschedulePings: true,
+		reconnectPeriod: 0,
+		connectTimeout: 12000
 	};
 
 	if (typeof ctx.globalOptions.proxy != "undefined") {
@@ -102,12 +92,21 @@ function listenMqtt(defaultFuncs, api, ctx, globalCallback) {
 	ctx.mqttClient = new mqtt.Client(_ => websocket(host, options.wsOptions), options);
 
 	const mqttClient = ctx.mqttClient;
+	const scheduleReconnect = function () {
+		if (!ctx.globalOptions.autoReconnect || ctx._stopRequested || ctx._mqttReconnectTimer) return;
+		ctx._mqttReconnectTimer = setTimeout(function () {
+			ctx._mqttReconnectTimer = null;
+			if (ctx.mqttClient === mqttClient && !ctx._stopRequested) {
+				listenMqtt(defaultFuncs, api, ctx, globalCallback);
+			}
+		}, 2000);
+	};
 
 	mqttClient.on('error', function (err) {
 		log.error("listenMqtt", err);
-		mqttClient.end();
+		if (ctx.mqttClient === mqttClient) mqttClient.end(true);
 		if (ctx.globalOptions.autoReconnect) {
-			listenMqtt(defaultFuncs, api, ctx, globalCallback);
+			scheduleReconnect();
 		} else {
 			utils.checkLiveCookie(ctx, defaultFuncs)
 				.then(res => {
@@ -126,52 +125,65 @@ function listenMqtt(defaultFuncs, api, ctx, globalCallback) {
 	});
 
 	mqttClient.on('close', function () {
+		if (ctx.mqttClient === mqttClient) scheduleReconnect();
+	});
 
+	mqttClient.on('disconnect', function () {
+		if (ctx.mqttClient === mqttClient) scheduleReconnect();
 	});
 
 	mqttClient.on('connect', function () {
-		topics.forEach(function (topicsub) {
-			mqttClient.subscribe(topicsub);
+		mqttClient.subscribe(topics, function (subscribeError) {
+			if (subscribeError) {
+				log.error("listenMqtt", subscribeError);
+				mqttClient.end(true);
+				return;
+			}
+
+			let topic;
+			const queue = {
+				sync_api_version: MQTT.syncApiVersion,
+				max_deltas_able_to_process: MQTT.maxDeltas,
+				delta_batch_size: MQTT.deltaBatchSize,
+				encoding: "JSON",
+				entity_fbid: ctx.globalOptions.pageID || ctx.userID,
+				initial_titan_sequence_id: ctx.lastSeqId,
+				device_params: null
+			};
+
+			if (ctx.syncToken) {
+				topic = "/messenger_sync_get_diffs";
+				queue.last_seq_id = ctx.lastSeqId;
+				queue.sync_token = ctx.syncToken;
+			}
+			else {
+				topic = "/messenger_sync_create_queue";
+			}
+
+			mqttClient.publish(topic, JSON.stringify(queue), { qos: 1, retain: false });
+			mqttClient.publish("/foreground_state", JSON.stringify({ foreground: chatOn }), { qos: 1 });
+			mqttClient.publish("/set_client_settings", JSON.stringify({ make_user_available_when_in_foreground: true }), { qos: 1 });
+
+			const rTimeout = setTimeout(function () {
+				ctx._rTimeout = null;
+				if (ctx._stopRequested) return;
+				mqttClient.end(true);
+				if (ctx.globalOptions.autoReconnect && !ctx._stopRequested) {
+					listenMqtt(defaultFuncs, api, ctx, globalCallback);
+				}
+			}, 8000);
+			ctx._rTimeout = rTimeout;
+
+			ctx.tmsWait = function () {
+				clearTimeout(rTimeout);
+				ctx._rTimeout = null;
+				ctx.globalOptions.emitReady ? globalCallback({
+					type: "ready",
+					error: null
+				}) : "";
+				delete ctx.tmsWait;
+			};
 		});
-
-		let topic;
-		const queue = {
-			sync_api_version: 10,
-			max_deltas_able_to_process: 1000,
-			delta_batch_size: 500,
-			encoding: "JSON",
-			entity_fbid: ctx.i_userID || ctx.userID
-		};
-
-		if (ctx.syncToken) {
-			topic = "/messenger_sync_get_diffs";
-			queue.last_seq_id = ctx.lastSeqId;
-			queue.sync_token = ctx.syncToken;
-		} else {
-			topic = "/messenger_sync_create_queue";
-			queue.initial_titan_sequence_id = ctx.lastSeqId;
-			queue.device_params = null;
-		}
-
-		mqttClient.publish(topic, JSON.stringify(queue), { qos: 1, retain: false });
-		// set status online
-		// fix by NTKhang
-		mqttClient.publish("/foreground_state", JSON.stringify({ foreground: chatOn }), { qos: 1 });
-		mqttClient.publish("/set_client_settings", JSON.stringify({ make_user_available_when_in_foreground: true }), { qos: 1 });
-
-		const rTimeout = setTimeout(function () {
-			mqttClient.end();
-			listenMqtt(defaultFuncs, api, ctx, globalCallback);
-		}, 5000);
-
-		ctx.tmsWait = function () {
-			clearTimeout(rTimeout);
-			ctx.globalOptions.emitReady ? globalCallback({
-				type: "ready",
-				error: null
-			}) : "";
-			delete ctx.tmsWait;
-		};
 
 	});
 
@@ -213,8 +225,7 @@ function listenMqtt(defaultFuncs, api, ctx, globalCallback) {
 			}
 
 			//If it contains more than 1 delta
-			for (const i in jsonMessage.deltas) {
-				const delta = jsonMessage.deltas[i];
+			for (const delta of jsonMessage.deltas || []) {
 				parseDelta(defaultFuncs, api, ctx, globalCallback, { "delta": delta });
 			}
 		} else if (topic === "/thread_typing" || topic === "/orca_typing_notifications") {
@@ -227,8 +238,7 @@ function listenMqtt(defaultFuncs, api, ctx, globalCallback) {
 			(function () { globalCallback(null, typ); })();
 		} else if (topic === "/orca_presence") {
 			if (!ctx.globalOptions.updatePresence) {
-				for (const i in jsonMessage.list) {
-					const data = jsonMessage.list[i];
+				for (const data of jsonMessage.list || []) {
 					const userID = data["u"];
 
 					const presence = {
@@ -446,8 +456,7 @@ function parseDelta(defaultFuncs, api, ctx, globalCallback, v) {
 								"av": ctx.globalOptions.pageID,
 								"queries": JSON.stringify({
 									"o0": {
-										//Using the same doc_id as forcedFetch
-										"doc_id": "2848441488556444",
+										"doc_id": GRAPHQL_DOCS.forcedFetch,
 										"query_params": {
 											"thread_and_message_id": {
 												"thread_id": callbackToReturn.threadID,
@@ -585,8 +594,7 @@ function parseDelta(defaultFuncs, api, ctx, globalCallback, v) {
 					"av": ctx.globalOptions.pageID,
 					"queries": JSON.stringify({
 						"o0": {
-							//This doc_id is valid as of March 25, 2020
-							"doc_id": "2848441488556444",
+							"doc_id": GRAPHQL_DOCS.forcedFetch,
 							"query_params": {
 								"thread_and_message_id": {
 									"thread_id": tid.toString(),
@@ -744,56 +752,36 @@ function markDelivery(ctx, api, threadID, messageID) {
 }
 
 function getSeqId(defaultFuncs, api, ctx, globalCallback) {
-	const jar = ctx.jar;
-	utils
-		.get('https://www.facebook.com/', jar, null, ctx.globalOptions, { noRef: true })
-		.then(utils.saveCookies(jar))
-		.then(function (resData) {
-			const html = resData.body;
-			const oldFBMQTTMatch = html.match(/irisSeqID:"(.+?)",appID:219994525426954,endpoint:"(.+?)"/);
-			let mqttEndpoint = null;
-			let region = null;
-			let irisSeqID = null;
-			let noMqttData = null;
-
-			if (oldFBMQTTMatch) {
-				irisSeqID = oldFBMQTTMatch[1];
-				mqttEndpoint = oldFBMQTTMatch[2];
-				region = new URL(mqttEndpoint).searchParams.get("region").toUpperCase();
-				log.info("login", `Got this account's message region: ${region}`);
-			} else {
-				const newFBMQTTMatch = html.match(/{"app_id":"219994525426954","endpoint":"(.+?)","iris_seq_id":"(.+?)"}/);
-				if (newFBMQTTMatch) {
-					irisSeqID = newFBMQTTMatch[2];
-					mqttEndpoint = newFBMQTTMatch[1].replace(/\\\//g, "/");
-					region = new URL(mqttEndpoint).searchParams.get("region").toUpperCase();
-					log.info("login", `Got this account's message region: ${region}`);
-				} else {
-					const legacyFBMQTTMatch = html.match(/(\["MqttWebConfig",\[\],{fbid:")(.+?)(",appID:219994525426954,endpoint:")(.+?)(",pollingEndpoint:")(.+?)(3790])/);
-					if (legacyFBMQTTMatch) {
-						mqttEndpoint = legacyFBMQTTMatch[4];
-						region = new URL(mqttEndpoint).searchParams.get("region").toUpperCase();
-						log.warn("login", `Cannot get sequence ID with new RegExp. Fallback to old RegExp (without seqID)...`);
-						log.info("login", `Got this account's message region: ${region}`);
-						log.info("login", `[Unused] Polling endpoint: ${legacyFBMQTTMatch[6]}`);
-					} else {
-						log.warn("login", "Cannot get MQTT region & sequence ID.");
-						noMqttData = html;
-					}
+	const form = {
+		av: ctx.globalOptions.pageID || ctx.userID,
+		queries: JSON.stringify({
+			o0: {
+				doc_id: GRAPHQL_DOCS.threadList,
+				query_params: {
+					limit: 1,
+					before: null,
+					tags: ["INBOX"],
+					includeDeliveryReceipts: false,
+					includeSeqID: true
 				}
 			}
+		})
+	};
 
-			ctx.lastSeqId = irisSeqID;
-			ctx.mqttEndpoint = mqttEndpoint;
-			ctx.region = region;
-			if (noMqttData) {
-				api["htmlData"] = noMqttData;
-			}
-
+	return defaultFuncs
+		.post("https://www.facebook.com/api/graphqlbatch/", ctx.jar, form)
+		.then(utils.parseAndCheckLogin(ctx, defaultFuncs))
+		.then(function (resData) {
+			const syncSeqId = resData && resData[0] && resData[0].o0 && resData[0].o0.data &&
+				resData[0].o0.data.viewer && resData[0].o0.data.viewer.message_threads &&
+				resData[0].o0.data.viewer.message_threads.sync_sequence_id;
+			if (!syncSeqId) throw new Error("getSeqId: no sync_sequence_id found");
+			ctx.lastSeqId = syncSeqId;
 			listenMqtt(defaultFuncs, api, ctx, globalCallback);
 		})
 		.catch(function (err) {
 			log.error("getSeqId", err);
+			globalCallback(err, null);
 		});
 }
 
@@ -806,15 +794,26 @@ module.exports = function (defaultFuncs, api, ctx) {
 
 				callback = callback || (() => { });
 				globalCallback = identity;
+				ctx._stopRequested = true;
+				if (ctx._rTimeout) {
+					clearTimeout(ctx._rTimeout);
+					ctx._rTimeout = null;
+				}
+				delete ctx.tmsWait;
+				if (ctx._mqttReconnectTimer) {
+					clearTimeout(ctx._mqttReconnectTimer);
+					ctx._mqttReconnectTimer = null;
+				}
 				if (ctx.mqttClient) {
-					ctx.mqttClient.unsubscribe("/webrtc");
-					ctx.mqttClient.unsubscribe("/rtc_multi");
-					ctx.mqttClient.unsubscribe("/onevc");
+					topics.forEach(topic => ctx.mqttClient.unsubscribe(topic));
 					ctx.mqttClient.publish("/browser_close", "{}");
 					ctx.mqttClient.end(false, function (...data) {
 						callback(data);
 						ctx.mqttClient = undefined;
 					});
+				}
+				else {
+					callback();
 				}
 			}
 
@@ -826,6 +825,7 @@ module.exports = function (defaultFuncs, api, ctx) {
 		}
 
 		const msgEmitter = new MessageEmitter();
+		ctx._stopRequested = false;
 		globalCallback = (callback || function (error, message) {
 			if (error) {
 				return msgEmitter.emit("error", error);

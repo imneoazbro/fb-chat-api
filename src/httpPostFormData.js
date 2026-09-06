@@ -38,7 +38,7 @@ module.exports = function (defaultFuncs, api, ctx) {
 
 		if (notAPI) {
 			utils
-				.postFormData(url, ctx.jar, form, ctx.globalOptions, ctx, customHeader)
+				.postFormData(url, ctx.jar, form, null, ctx.globalOptions, ctx, customHeader)
 				.then(function (resData) {
 					callback(null, resData.body.toString());
 				})
@@ -48,7 +48,7 @@ module.exports = function (defaultFuncs, api, ctx) {
 				});
 		} else {
 			defaultFuncs
-				.postFormData(url, ctx.jar, form, null, customHeader)
+				.postFormData(url, ctx.jar, form, null, null, customHeader)
 				.then(function (resData) {
 					callback(null, resData.body.toString());
 				})

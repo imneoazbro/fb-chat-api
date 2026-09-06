@@ -75,6 +75,8 @@ module.exports = function (defaultFuncs, api, ctx) {
 				callback(e);
 				return e;
 			}
+			callback(null);
+			return null;
 		}
 	};
 };

@@ -1,11 +1,122 @@
 /* eslint-disable no-prototype-builtins */
 "use strict";
 
-let request = promisifyPromise(require("request").defaults({ jar: true, proxy: process.env.FB_PROXY }));
+const axios = require("axios");
+const FormData = require("form-data");
+const { CookieJar } = require("tough-cookie");
+const { HttpsProxyAgent } = require("https-proxy-agent");
 const stream = require("stream");
 const log = require("npmlog");
 const querystring = require("querystring");
 const url = require("url");
+
+function createRequestClient(proxyUrl) {
+	return async function request(op) {
+		const headers = Object.assign({}, op.headers);
+		const requestUrl = new URL(op.url);
+		const jar = op.jar;
+
+		if (jar && typeof jar.getCookieStringSync === "function") {
+			const cookieHeader = jar.getCookieStringSync(op.url);
+			if (cookieHeader) headers.Cookie = cookieHeader;
+		}
+
+		let data;
+		if (op.formData) {
+			const multipart = new FormData();
+			const isStream = value => value && typeof value.pipe === "function";
+			const append = (key, value) => {
+				if (value === undefined || value === null) return;
+				if (value && typeof value === "object" && !Buffer.isBuffer(value) && !isStream(value)) {
+					multipart.append(key, JSON.stringify(value));
+					return;
+				}
+				multipart.append(key, typeof value === "string" || Buffer.isBuffer(value) || isStream(value) ? value : String(value));
+			};
+			Object.keys(op.formData).forEach(key => {
+				const value = op.formData[key];
+				if (value === undefined || value === null) return;
+				if (Array.isArray(value)) {
+					value.forEach(item => append(key, item));
+				}
+				else append(key, value);
+			});
+			delete headers["Content-Type"];
+			Object.assign(headers, multipart.getHeaders());
+			// Keep the legacy response metadata check case-insensitive in practice.
+			headers["Content-Type"] = headers["content-type"];
+			delete headers["content-type"];
+			data = multipart;
+		}
+		else if (op.form !== undefined) {
+			const form = {};
+			Object.keys(op.form || {}).forEach(key => {
+				const value = op.form[key];
+				if (Array.isArray(value)) {
+					form[key] = value.map(item => item && typeof item === "object" ? JSON.stringify(item) : item);
+				}
+				else {
+					form[key] = value && typeof value === "object" ? JSON.stringify(value) : value;
+				}
+			});
+			data = querystring.stringify(form);
+		}
+
+		const requestConfig = {
+			url: op.url,
+			method: op.method,
+			headers: headers,
+			params: op.qs,
+			data,
+			timeout: op.timeout || 60000,
+			decompress: true,
+			responseType: "text",
+			transformResponse: [value => value],
+			validateStatus: () => true
+		};
+
+		if (proxyUrl) {
+			const agent = new HttpsProxyAgent(proxyUrl);
+			requestConfig.httpAgent = agent;
+			requestConfig.httpsAgent = agent;
+			requestConfig.proxy = false;
+		}
+
+		const response = await axios.request(requestConfig);
+		const responseHeaders = Object.assign({}, response.headers);
+		const setCookies = [].concat(responseHeaders["set-cookie"] || []).filter(Boolean);
+		if (jar && typeof jar.setCookieSync === "function") {
+			setCookies.forEach(cookie => {
+				try {
+					jar.setCookieSync(cookie, op.url);
+				}
+				catch (_) { }
+			});
+		}
+
+		return {
+			statusCode: response.status,
+			body: response.data,
+			headers: responseHeaders,
+			request: {
+				uri: {
+					href: op.url,
+					protocol: requestUrl.protocol,
+					host: requestUrl.host,
+					hostname: requestUrl.hostname,
+					pathname: requestUrl.pathname,
+					search: requestUrl.search
+				},
+				method: op.method,
+				headers,
+				form: op.form,
+				formData: op.formData
+			}
+		};
+	};
+}
+
+let request = createRequestClient(process.env.FB_PROXY);
 
 class CustomError extends Error {
 	constructor(obj) {
@@ -84,34 +195,39 @@ function tryPromise(tryFunc) {
 }
 
 function setProxy(url) {
-	if (typeof url == "undefined")
-		return request = promisifyPromise(require("request").defaults({
-			jar: true
-		}));
-	return request = promisifyPromise(require("request").defaults({
-		jar: true,
-		proxy: url
-	}));
+	return request = createRequestClient(url);
 }
 
 function getHeaders(url, options, ctx, customHeader) {
+	options = options || {};
+	const sanitizeHeaderValue = value => String(value == null ? "" : value)
+		.replace(/[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F\r\n\[\]]/g, "")
+		.trim();
 	const headers = {
 		"Content-Type": "application/x-www-form-urlencoded",
 		Referer: "https://www.facebook.com/",
 		Host: url.replace("https://", "").split("/")[0],
 		Origin: "https://www.facebook.com",
-		"User-Agent": options.userAgent,
+		"User-Agent": options.userAgent || "Mozilla/5.0",
 		Connection: "keep-alive",
 		"sec-fetch-site": "same-origin"
 	};
 	if (customHeader) {
-		Object.assign(headers, customHeader);
+		Object.keys(customHeader).forEach(key => {
+			const value = customHeader[key];
+			if (value === null || value === undefined || typeof value === "object" || typeof value === "function") return;
+			headers[key] = sanitizeHeaderValue(value);
+		});
 	}
 	if (ctx && ctx.region) {
 		headers["X-MSGR-Region"] = ctx.region;
 	}
 
-	return headers;
+	return Object.keys(headers).reduce((result, key) => {
+		const value = sanitizeHeaderValue(headers[key]);
+		if (value) result[key] = value;
+		return result;
+	}, {});
 }
 
 function isReadableStream(obj) {
@@ -123,7 +239,7 @@ function isReadableStream(obj) {
 	);
 }
 
-function get(url, jar, qs, options, ctx) {
+function get(url, jar, qs, options, ctx, customHeader) {
 	// I'm still confused about this
 	if (getType(qs) === "Object") {
 		for (const prop in qs) {
@@ -133,7 +249,7 @@ function get(url, jar, qs, options, ctx) {
 		}
 	}
 	const op = {
-		headers: getHeaders(url, options, ctx),
+		headers: getHeaders(url, options, ctx, customHeader),
 		timeout: 60000,
 		qs: qs,
 		url: url,
@@ -163,9 +279,8 @@ function post(url, jar, form, options, ctx, customHeader) {
 	});
 }
 
-function postFormData(url, jar, form, qs, options, ctx) {
-	const headers = getHeaders(url, options, ctx);
-	headers["Content-Type"] = "multipart/form-data";
+function postFormData(url, jar, form, qs, options, ctx, customHeader) {
+	const headers = getHeaders(url, options, ctx, customHeader);
 	const op = {
 		headers: headers,
 		timeout: 60000,
@@ -1114,7 +1229,11 @@ function generateTimestampRelative() {
 
 function makeDefaults(html, userID, ctx) {
 	let reqCounter = 1;
-	const fb_dtsg = getFrom(html, 'name="fb_dtsg" value="', '"');
+	const fb_dtsg =
+		getFrom(html, 'name="fb_dtsg" value="', '"') ||
+		((html.match(/DTSGInitialData[^\n]*?"token":"([^"]+)"/) || [])[1]) ||
+		((html.match(/"DTSGInitialData"[^\n]*?"token":"([^"]+)"/) || [])[1]) ||
+		"";
 
 	// @Hack Ok we've done hacky things, this is definitely on top 5.
 	// We totally assume the object is flat and try parsing until a }.
@@ -1135,7 +1254,7 @@ function makeDefaults(html, userID, ctx) {
 	for (let i = 0; i < fb_dtsg.length; i++) {
 		ttstamp += fb_dtsg.charCodeAt(i);
 	}
-	const revision = getFrom(html, 'revision":', ",");
+	const revision = getFrom(html, 'revision":', ",") || "";
 
 	function mergeWithDefaults(obj) {
 		// @TODO This is missing a key called __dyn.
@@ -1152,14 +1271,17 @@ function makeDefaults(html, userID, ctx) {
 			__user: userID,
 			__req: (reqCounter++).toString(36),
 			__rev: revision,
-			__a: 1,
+			__a: 1
 			// __af: siteData.features,
-			fb_dtsg: ctx.fb_dtsg ? ctx.fb_dtsg : fb_dtsg,
-			jazoest: ctx.ttstamp ? ctx.ttstamp : ttstamp
 			// __spin_r: siteData.__spin_r,
 			// __spin_b: siteData.__spin_b,
 			// __spin_t: siteData.__spin_t,
 		};
+		const token = ctx.fb_dtsg || fb_dtsg;
+		if (token) {
+			newObj.fb_dtsg = token;
+			newObj.jazoest = ctx.ttstamp || ttstamp;
+		}
 
 		// @TODO this is probably not needed.
 		//         Ben - July 15th 2017
@@ -1191,14 +1313,15 @@ function makeDefaults(html, userID, ctx) {
 		return get(url, jar, mergeWithDefaults(qs), ctx.globalOptions, ctxx || ctx, customHeader);
 	}
 
-	function postFormDataWithDefault(url, jar, form, qs, ctxx) {
+	function postFormDataWithDefault(url, jar, form, qs, ctxx, customHeader = {}) {
 		return postFormData(
 			url,
 			jar,
 			mergeWithDefaults(form),
 			mergeWithDefaults(qs),
 			ctx.globalOptions,
-			ctxx || ctx
+			ctxx || ctx,
+			customHeader
 		);
 	}
 
@@ -1246,33 +1369,23 @@ function parseAndCheckLogin(ctx, defaultFuncs, retryCount, sourceCall) {
 					retryTime +
 					" milliseconds..."
 				);
-				const url =
-					data.request.uri.protocol +
-					"//" +
-					data.request.uri.hostname +
-					data.request.uri.pathname;
-				if (
-					data.request.headers["Content-Type"].split(";")[0] ===
-					"multipart/form-data"
-				) {
-					return delay(retryTime)
-						.then(function () {
-							return defaultFuncs.postFormData(
-								url,
-								ctx.jar,
-								data.request.formData,
-								{}
-							);
-						})
-						.then(parseAndCheckLogin(ctx, defaultFuncs, retryCount, sourceCall));
-				}
-				else {
-					return delay(retryTime)
-						.then(function () {
-							return defaultFuncs.post(url, ctx.jar, data.request.formData);
-						})
-						.then(parseAndCheckLogin(ctx, defaultFuncs, retryCount, sourceCall));
-				}
+				const url = data.request.uri.href ||
+					(data.request.uri.protocol + "//" + data.request.uri.host + data.request.uri.pathname + (data.request.uri.search || ""));
+				const method = String(data.request.method || "GET").toUpperCase();
+				const contentType = String(
+					data.request.headers["Content-Type"] || data.request.headers["content-type"] || ""
+				).split(";")[0].toLowerCase();
+				return delay(retryTime)
+					.then(function () {
+						if (method === "GET") {
+							return defaultFuncs.get(url, ctx.jar, null, ctx);
+						}
+						if (contentType === "multipart/form-data") {
+							return defaultFuncs.postFormData(url, ctx.jar, data.request.formData, null, ctx);
+						}
+						return defaultFuncs.post(url, ctx.jar, data.request.form, ctx);
+					})
+					.then(parseAndCheckLogin(ctx, defaultFuncs, retryCount, sourceCall));
 			}
 			if (data.statusCode !== 200)
 				throw new CustomError({
@@ -1316,8 +1429,8 @@ function parseAndCheckLogin(ctx, defaultFuncs, retryCount, sourceCall) {
 				);
 				const cookie = formatCookie(res.jsmods.require[0][3], "facebook");
 				const cookie2 = formatCookie(res.jsmods.require[0][3], "messenger");
-				ctx.jar.setCookie(cookie, "https://www.facebook.com");
-				ctx.jar.setCookie(cookie2, "https://www.messenger.com");
+				ctx.jar.setCookieSync(cookie, "https://www.facebook.com");
+				ctx.jar.setCookieSync(cookie2, "https://www.messenger.com");
 			}
 
 			// On every request we check if we got a DTSG and we mutate the context so that we use the latest
@@ -1367,13 +1480,13 @@ function checkLiveCookie(ctx, defaultFuncs) {
 
 function saveCookies(jar) {
 	return function (res) {
-		const cookies = res.headers["set-cookie"] || [];
+		const cookies = [].concat((res.headers && res.headers["set-cookie"]) || []).filter(Boolean);
 		cookies.forEach(function (c) {
 			if (c.indexOf(".facebook.com") > -1) {
-				jar.setCookie(c, "https://www.facebook.com");
+				jar.setCookieSync(c, "https://www.facebook.com");
 			}
 			const c2 = c.replace(/domain=\.facebook\.com/, "domain=.messenger.com");
-			jar.setCookie(c2, "https://www.messenger.com");
+			jar.setCookieSync(c2, "https://www.messenger.com");
 		});
 		return res;
 	};
@@ -1494,10 +1607,27 @@ function decodeClientPayload(payload) {
 }
 
 function getAppState(jar) {
-	return jar
-		.getCookies("https://www.facebook.com")
-		.concat(jar.getCookies("https://facebook.com"))
-		.concat(jar.getCookies("https://www.messenger.com"));
+	const getCookies = typeof jar.getCookiesSync === "function" ? jar.getCookiesSync.bind(jar) : jar.getCookies.bind(jar);
+	const cookies = getCookies("https://www.facebook.com")
+		.concat(getCookies("https://facebook.com"))
+		.concat(getCookies("https://www.messenger.com"));
+	const seen = new Set();
+	return cookies.filter(cookie => {
+		const key = cookie.key || cookie.name;
+		const id = key + "|" + (cookie.domain || "") + "|" + (cookie.path || "/");
+		if (seen.has(id)) return false;
+		seen.add(id);
+		return Boolean(key);
+	}).map(cookie => ({
+		key: cookie.key || cookie.name,
+		value: cookie.value,
+		domain: cookie.domain || ".facebook.com",
+		path: cookie.path || "/",
+		hostOnly: Boolean(cookie.hostOnly),
+		secure: Boolean(cookie.secure),
+		httpOnly: Boolean(cookie.httpOnly),
+		expires: cookie.expires || "Infinity"
+	}));
 }
 module.exports = {
 	CustomError,
@@ -1512,7 +1642,9 @@ module.exports = {
 	makeParsable,
 	arrToForm,
 	getSignatureID,
-	getJar: request.jar,
+	getJar: function () {
+		return new CookieJar();
+	},
 	generateTimestampRelative,
 	makeDefaults,
 	parseAndCheckLogin,
@@ -1541,4 +1673,3 @@ module.exports = {
 	setProxy,
 	checkLiveCookie
 };
-

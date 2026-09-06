@@ -2,6 +2,7 @@
 
 const utils = require("../utils");
 const log = require("npmlog");
+const { GRAPHQL_DOCS } = require("./protocol");
 
 module.exports = function (defaultFuncs, api, ctx) {
 	return function createNewGroup(participantIDs, groupTitle, callback) {
@@ -46,8 +47,7 @@ module.exports = function (defaultFuncs, api, ctx) {
 			fb_api_caller_class: "RelayModern",
 			fb_api_req_friendly_name: "MessengerGroupCreateMutation",
 			av: ctx.i_userID || ctx.userID,
-			//This doc_id is valid as of January 11th, 2020
-			doc_id: "577041672419534",
+			doc_id: GRAPHQL_DOCS.createGroup,
 			variables: JSON.stringify({
 				input: {
 					entry_point: "jewel_new_group",

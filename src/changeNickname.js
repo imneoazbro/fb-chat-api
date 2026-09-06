@@ -2,9 +2,33 @@
 
 const utils = require("../utils");
 const log = require("npmlog");
+const { MQTT } = require("./protocol");
+const { publishRequest, nextTaskID } = require("./mqttRequest");
 
 module.exports = function (defaultFuncs, api, ctx) {
 	return function changeNickname(nickname, threadID, participantID, callback) {
+		if (ctx.mqttClient) {
+			return publishRequest(ctx, {
+				app_id: MQTT.lightspeedAppId,
+				payload: JSON.stringify({
+					epoch_id: utils.generateOfflineThreadingID(),
+					tasks: [{
+						failure_count: null,
+						label: "44",
+						payload: JSON.stringify({
+							thread_key: threadID,
+							contact_id: participantID,
+							nickname: nickname || "",
+							sync_group: 1
+						}),
+						queue_name: "thread_participant_nickname",
+						task_id: nextTaskID(ctx)
+					}],
+					version_id: MQTT.threadMutationVersion
+				}),
+				type: 3
+			}, callback);
+		}
 		let resolveFunc = function () { };
 		let rejectFunc = function () { };
 		const returnPromise = new Promise(function (resolve, reject) {

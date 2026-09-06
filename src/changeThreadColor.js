@@ -2,9 +2,29 @@
 
 const utils = require("../utils");
 const log = require("npmlog");
+const { GRAPHQL_DOCS, MQTT } = require("./protocol");
+const { publishRequest, nextTaskID } = require("./mqttRequest");
 
 module.exports = function (defaultFuncs, api, ctx) {
 	return function changeThreadColor(color, threadID, callback) {
+		if (ctx.mqttClient) {
+			return publishRequest(ctx, {
+				app_id: MQTT.lightspeedAppId,
+				payload: JSON.stringify({
+					data_trace_id: null,
+					epoch_id: utils.generateOfflineThreadingID(),
+					tasks: [{
+						failure_count: null,
+						label: "43",
+						payload: JSON.stringify({ thread_key: threadID, theme_fbid: String(color).toLowerCase(), source: null, sync_group: 1, payload: null }),
+						queue_name: "thread_theme",
+						task_id: nextTaskID(ctx)
+					}],
+					version_id: MQTT.threadMutationVersion
+				}),
+				type: 3
+			}, callback);
+		}
 		let resolveFunc = function () { };
 		let rejectFunc = function () { };
 		const returnPromise = new Promise(function (resolve, reject) {
@@ -30,8 +50,7 @@ module.exports = function (defaultFuncs, api, ctx) {
 			dpr: 1,
 			queries: JSON.stringify({
 				o0: {
-					//This doc_id is valid as of January 31, 2020
-					doc_id: "1727493033983591",
+					doc_id: GRAPHQL_DOCS.changeThreadColor,
 					query_params: {
 						data: {
 							actor_id: ctx.i_userID || ctx.userID,

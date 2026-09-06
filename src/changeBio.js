@@ -2,6 +2,7 @@
 
 const utils = require("../utils");
 const log = require("npmlog");
+const { GRAPHQL_DOCS } = require("./protocol");
 
 module.exports = function (defaultFuncs, api, ctx) {
 	return function changeBio(bio, publish, callback) {
@@ -38,7 +39,7 @@ module.exports = function (defaultFuncs, api, ctx) {
 			fb_api_caller_class: "RelayModern",
 			fb_api_req_friendly_name: "ProfileCometSetBioMutation",
 			// This doc_is is valid as of May 23, 2020
-			doc_id: "2725043627607610",
+			doc_id: GRAPHQL_DOCS.changeBio,
 			variables: JSON.stringify({
 				input: {
 					bio: bio,

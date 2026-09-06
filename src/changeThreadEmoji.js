@@ -2,9 +2,28 @@
 
 const utils = require("../utils");
 const log = require("npmlog");
+const { MQTT } = require("./protocol");
+const { publishRequest, nextTaskID } = require("./mqttRequest");
 
 module.exports = function (defaultFuncs, api, ctx) {
 	return function changeThreadEmoji(emoji, threadID, callback) {
+		if (ctx.mqttClient) {
+			return publishRequest(ctx, {
+				app_id: MQTT.lightspeedAppId,
+				payload: JSON.stringify({
+					epoch_id: utils.generateOfflineThreadingID(),
+					tasks: [{
+						failure_count: null,
+						label: "100003",
+						payload: JSON.stringify({ thread_key: threadID, custom_emoji: emoji, avatar_sticker_instruction_key_id: null, sync_group: 1 }),
+						queue_name: "thread_quick_reaction",
+						task_id: nextTaskID(ctx)
+					}],
+					version_id: MQTT.threadMutationVersion
+				}),
+				type: 3
+			}, callback);
+		}
 		let resolveFunc = function () { };
 		let rejectFunc = function () { };
 		const returnPromise = new Promise(function (resolve, reject) {

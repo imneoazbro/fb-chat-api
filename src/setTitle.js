@@ -2,9 +2,28 @@
 
 const utils = require("../utils");
 const log = require("npmlog");
+const { MQTT } = require("./protocol");
+const { publishRequest, nextTaskID } = require("./mqttRequest");
 
 module.exports = function (defaultFuncs, api, ctx) {
 	return function setTitle(newTitle, threadID, callback) {
+		if (ctx.mqttClient) {
+			return publishRequest(ctx, {
+				app_id: MQTT.lightspeedAppId,
+				payload: JSON.stringify({
+					epoch_id: utils.generateOfflineThreadingID(),
+					tasks: [{
+						failure_count: null,
+						label: "32",
+						payload: JSON.stringify({ thread_key: threadID, thread_name: newTitle, sync_group: 1 }),
+						queue_name: String(threadID),
+						task_id: nextTaskID(ctx)
+					}],
+					version_id: MQTT.threadMutationVersion
+				}),
+				type: 3
+			}, callback);
+		}
 		if (
 			!callback &&
 			(utils.getType(threadID) === "Function" ||

@@ -2,6 +2,7 @@
 
 const utils = require("../utils");
 const log = require("npmlog");
+const { GRAPHQL_DOCS } = require("./protocol");
 
 module.exports = function (defaultFuncs, api, ctx) {
 	return function setMessageReaction(reaction, messageID, callback, forceCustomReaction) {
@@ -85,7 +86,7 @@ module.exports = function (defaultFuncs, api, ctx) {
 		};
 
 		const qs = {
-			doc_id: "1491398900900362",
+			doc_id: GRAPHQL_DOCS.messageReaction,
 			variables: JSON.stringify(variables),
 			dpr: 1
 		};
@@ -97,7 +98,7 @@ module.exports = function (defaultFuncs, api, ctx) {
 				{},
 				qs
 			)
-			.then(utils.parseAndCheckLogin(ctx.jar, defaultFuncs))
+			.then(utils.parseAndCheckLogin(ctx, defaultFuncs))
 			.then(function (resData) {
 				if (!resData) {
 					throw { error: "setReaction returned empty object." };

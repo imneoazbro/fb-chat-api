@@ -81,6 +81,41 @@ module.exports = function (defaultFuncs, api, ctx) {
 			callback = () => { };
 		}
 
+		if (ctx.mqttClient && utils.getType(isGroup) === "Boolean") {
+			const publishStatus = (typing, done) => {
+				ctx.wsReqNumber = (ctx.wsReqNumber || 0) + 1;
+				const payload = {
+					app_id: "772021112871879",
+					payload: JSON.stringify({
+						label: "3",
+						payload: JSON.stringify({
+							thread_key: String(threadID),
+							is_group_thread: isGroup ? 1 : 0,
+							is_typing: typing ? 1 : 0,
+							attribution: 0,
+							sync_group: 1,
+							thread_type: isGroup ? 2 : 1
+						}),
+						version: "8965252033599983"
+					}),
+					request_id: ctx.wsReqNumber,
+					type: 4
+				};
+				try {
+					ctx.mqttClient.publish("/ls_req", JSON.stringify(payload), { qos: 1, retain: false }, done);
+				}
+				catch (err) {
+					done(err);
+				}
+			};
+			publishStatus(true, function (err) {
+				callback(err || null);
+			});
+			return function endTyping(nextCallback) {
+				publishStatus(false, nextCallback || function () { });
+			};
+		}
+
 		makeTypingIndicator(true, threadID, callback, isGroup);
 
 		return function end(cb) {

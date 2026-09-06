@@ -8,6 +8,7 @@
 
 const utils = require("../utils");
 const log = require("npmlog");
+const { GRAPHQL_DOCS } = require("./protocol");
 
 function formatData(resData) {
 	return {
@@ -73,7 +74,7 @@ module.exports = function (defaultFuncs, api, ctx) {
 			av: ctx.i_userID || ctx.userID,
 			fb_api_caller_class: "RelayModern",
 			fb_api_req_friendly_name: "CometUFIFeedbackReactMutation",
-			doc_id: "4769042373179384",
+			doc_id: GRAPHQL_DOCS.postReaction,
 			variables: JSON.stringify({
 				input: {
 					actor_id: ctx.i_userID || ctx.userID,

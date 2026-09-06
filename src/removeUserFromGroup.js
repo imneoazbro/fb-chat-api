@@ -2,9 +2,29 @@
 
 const utils = require("../utils");
 const log = require("npmlog");
+const { publishRequest, nextTaskID } = require("./mqttRequest");
 
 module.exports = function (defaultFuncs, api, ctx) {
 	return function removeUserFromGroup(userID, threadID, callback) {
+		if (ctx.mqttClient) {
+			const request = {
+				app_id: "2220391788200892",
+				payload: JSON.stringify({
+					epoch_id: utils.generateOfflineThreadingID(),
+					tasks: [{
+						failure_count: null,
+						label: "140",
+						payload: JSON.stringify({ thread_id: threadID, contact_id: userID, sync_group: 1 }),
+						queue_name: "remove_participant_v2",
+						task_id: nextTaskID(ctx)
+					}],
+					version_id: "25002366262773827"
+				}),
+				type: 3
+			};
+			const mqttCallback = typeof callback === "function" ? (err) => callback(err, err ? undefined : true) : null;
+			return publishRequest(ctx, request, mqttCallback).then(() => true);
+		}
 		if (
 			!callback &&
 			(utils.getType(threadID) === "Function" ||
